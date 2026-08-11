@@ -7,8 +7,17 @@ export interface Task {
   completed: boolean;
 }
 
+export interface PomodoroSession {
+  id: string;
+  taskId: string | null;
+  startTime: Date;
+  endTime: Date | null;
+  duration: number; // in seconds
+  mode: PomodoroMode;
+}
+
 export interface DailyStats {
-  date: string;
+  date: Date;
   pomodorosCompleted: number;
   focusTimeMinutes: number;
 }
@@ -17,6 +26,27 @@ export class AppError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'AppError';
+  }
+}
+
+export class InvalidConfigError extends AppError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidConfigError';
+  }
+}
+
+export class TaskError extends AppError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TaskError';
+  }
+}
+
+export class TaskNotFoundError extends TaskError {
+  constructor(taskId: string) {
+    super(`Task with ID '${taskId}' not found.`);
+    this.name = 'TaskNotFoundError';
   }
 }
 
@@ -30,6 +60,8 @@ export class PomodoroTracker {
   private _longBreakDuration: number;
   private _tasks: Task[] = [];
   private _dailyStats: DailyStats[] = [];
+  private _sessions: PomodoroSession[] = [];
+  private _currentSession: PomodoroSession | null = null;
 
   constructor(
     pomodoroDuration: number = 25 * 60,
@@ -37,7 +69,7 @@ export class PomodoroTracker {
     longBreakDuration: number = 15 * 60
   ) {
     if (pomodoroDuration <= 0 || shortBreakDuration <= 0 || longBreakDuration <= 0) {
-      throw new AppError('Durations must be positive numbers.');
+      throw new InvalidConfigError('Durations must be positive numbers.');
     }
     this._pomodoroDuration = pomodoroDuration;
     this._shortBreakDuration = shortBreakDuration;
@@ -51,45 +83,100 @@ export class PomodoroTracker {
   get timeLeft(): number { return this._timeLeft; }
   get tasks(): Task[] { return [...this._tasks]; }
   get dailyStats(): DailyStats[] { return [...this._dailyStats]; }
+  get sessions(): PomodoroSession[] { return [...this._sessions]; }
 
   private saveState(): void {
     localStorage.setItem('pomodoroTasks', JSON.stringify(this._tasks));
-    localStorage.setItem('pomodoroDailyStats', JSON.stringify(this._dailyStats));
+    localStorage.setItem('pomodoroDailyStats', JSON.stringify(this._dailyStats.map(s => ({ ...s, date: s.date.toISOString() }))));
+    localStorage.setItem('pomodoroSessions', JSON.stringify(this._sessions.map(s => ({
+      ...s,
+      startTime: s.startTime.toISOString(),
+      endTime: s.endTime ? s.endTime.toISOString() : null
+    }))));
   }
 
   private loadState(): void {
-    const storedTasks = localStorage.getItem('pomodoroTasks');
-    if (storedTasks) {
-      this._tasks = JSON.parse(storedTasks);
+    try {
+      const storedTasks = localStorage.getItem('pomodoroTasks');
+      this._tasks = storedTasks ? JSON.parse(storedTasks) : [];
+    } catch (e) {
+      console.error('Error parsing stored tasks, resetting:', e);
+      this._tasks = [];
     }
-    const storedStats = localStorage.getItem('pomodoroDailyStats');
-    if (storedStats) {
-      this._dailyStats = JSON.parse(storedStats);
+
+    try {
+      const storedStats = localStorage.getItem('pomodoroDailyStats');
+      this._dailyStats = storedStats ? JSON.parse(storedStats).map((s: any) => ({ ...s, date: new Date(s.date) })) : [];
+    } catch (e) {
+      console.error('Error parsing stored daily stats, resetting:', e);
+      this._dailyStats = [];
+    }
+
+    try {
+      const storedSessions = localStorage.getItem('pomodoroSessions');
+      this._sessions = storedSessions ? JSON.parse(storedSessions).map((s: any) => ({
+        ...s,
+        startTime: new Date(s.startTime),
+        endTime: s.endTime ? new Date(s.endTime) : null
+      })) : [];
+    } catch (e) {
+      console.error('Error parsing stored sessions, resetting:', e);
+      this._sessions = [];
     }
   }
 
-  private updateDailyStats(pomodorosCompleted: number, focusTimeMinutes: number): void {
-    const today = new Date().toISOString().split('T')[0];
-    let statsForToday = this._dailyStats.find(s => s.date === today);
-    if (statsForToday) {
-      statsForToday.pomodorosCompleted += pomodorosCompleted;
-      statsForToday.focusTimeMinutes += focusTimeMinutes;
-    } else {
-      this._dailyStats.push({ date: today, pomodorosCompleted, focusTimeMinutes });
-    }
+  private updateDailyStats(): void {
+    this._dailyStats = []; // Recalculate daily stats from sessions
+    const dailyStatsMap = new Map<string, DailyStats>();
+
+    this._sessions.forEach(session => {
+      if (session.mode === 'pomodoro' && session.endTime) {
+        const dateKey = session.startTime.toISOString().split('T')[0];
+        let stats = dailyStatsMap.get(dateKey);
+        if (!stats) {
+          stats = { date: new Date(dateKey), pomodorosCompleted: 0, focusTimeMinutes: 0 };
+          dailyStatsMap.set(dateKey, stats);
+        }
+        stats.pomodorosCompleted += 1;
+        stats.focusTimeMinutes += Math.floor(session.duration / 60);
+      }
+    });
+    this._dailyStats = Array.from(dailyStatsMap.values());
     this.saveState();
   }
 
-  start(onTick: (timeLeft: number) => void, onComplete: () => void): void {
+  getDailyStats(date: Date): DailyStats | undefined {
+    const dateKey = date.toISOString().split('T')[0];
+    return this._dailyStats.find(s => s.date.toISOString().split('T')[0] === dateKey);
+  }
+
+  start(onTick: (timeLeft: number) => void, onComplete: () => void, taskId: string | null = null): void {
     if (this._state === 'running') return;
+
     this._state = 'running';
+    this._currentSession = {
+      id: Date.now().toString(),
+      taskId: taskId,
+      startTime: new Date(),
+      endTime: null,
+      duration: 0,
+      mode: this._mode
+    };
+
     this.timerId = setInterval(() => {
       this._timeLeft--;
+      if (this._currentSession) {
+        this._currentSession.duration++;
+      }
       onTick(this._timeLeft);
+
       if (this._timeLeft <= 0) {
         this.stop();
-        if (this._mode === 'pomodoro') {
-          this.updateDailyStats(1, Math.floor(this._pomodoroDuration / 60));
+        if (this._currentSession) {
+          this._currentSession.endTime = new Date();
+          this._sessions.push(this._currentSession);
+          this._currentSession = null;
+          this.updateDailyStats();
         }
         onComplete();
       }
@@ -102,23 +189,30 @@ export class PomodoroTracker {
     this._state = 'paused';
   }
 
+  resume(onTick: (timeLeft: number) => void, onComplete: () => void): void {
+    if (this._state !== 'paused') return;
+    this.start(onTick, onComplete, this._currentSession?.taskId);
+  }
+
   stop(): void {
     if (this.timerId) {
       clearInterval(this.timerId);
       this.timerId = null;
     }
+    if (this._state === 'running' || this._state === 'paused') {
+      if (this._currentSession) {
+        // If stopped before completion, don't count it as a full session
+        // Optionally, could save partial sessions or discard.
+        // For now, we discard if not completed.
+        this._currentSession = null;
+      }
+    }
     this._state = 'stopped';
+    this.resetTime();
   }
 
-  reset(): void {
-    this.stop();
-    this.setMode(this._mode);
-  }
-
-  setMode(mode: PomodoroMode): void {
-    this.stop();
-    this._mode = mode;
-    switch (mode) {
+  resetTime(): void {
+    switch (this._mode) {
       case 'pomodoro':
         this._timeLeft = this._pomodoroDuration;
         break;
@@ -131,24 +225,49 @@ export class PomodoroTracker {
     }
   }
 
-  addTask(name: string): void {
-    if (!name.trim()) {
-      throw new AppError('Task name cannot be empty.');
-    }
-    this._tasks.push({ id: Date.now().toString(), name, completed: false });
-    this.saveState();
+  setMode(mode: PomodoroMode): void {
+    this.stop(); // Stop any running timer first
+    this._mode = mode;
+    this.resetTime();
   }
 
-  toggleTaskCompletion(id: string): void {
-    const task = this._tasks.find(t => t.id === id);
-    if (task) {
-      task.completed = !task.completed;
-      this.saveState();
+  addTask(name: string): Task {
+    const trimmedName = name.trim();
+    if (!trimmedName) {
+      throw new TaskError('Task name cannot be empty.');
     }
+    const newTask: Task = { id: Date.now().toString(), name: trimmedName, completed: false };
+    this._tasks.push(newTask);
+    this.saveState();
+    return newTask;
+  }
+
+  updateTask(id: string, updates: Partial<Task>): Task {
+    const taskIndex = this._tasks.findIndex(t => t.id === id);
+    if (taskIndex === -1) {
+      throw new TaskNotFoundError(id);
+    }
+    this._tasks[taskIndex] = { ...this._tasks[taskIndex], ...updates };
+    this.saveState();
+    return this._tasks[taskIndex];
   }
 
   deleteTask(id: string): void {
+    const initialLength = this._tasks.length;
     this._tasks = this._tasks.filter(t => t.id !== id);
+    if (this._tasks.length === initialLength) {
+      throw new TaskNotFoundError(id);
+    }
     this.saveState();
+  }
+
+  toggleTaskCompletion(id: string): Task {
+    const task = this._tasks.find(t => t.id === id);
+    if (!task) {
+      throw new TaskNotFoundError(id);
+    }
+    task.completed = !task.completed;
+    this.saveState();
+    return task;
   }
 }

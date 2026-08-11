@@ -1,4 +1,4 @@
-import { PomodoroTracker, PomodoroState, PomodoroMode, Task, DailyStats, AppError } from './app';
+import { PomodoroTracker, PomodoroState, PomodoroMode, Task, DailyStats, AppError, TaskNotFoundError } from './app';
 
 const timerDisplay = document.getElementById('timer-display') as HTMLDivElement;
 const startButton = document.getElementById('start-button') as HTMLButtonElement;
@@ -49,8 +49,8 @@ function renderTasks(tasks: Task[]): void {
 }
 
 function renderStats(stats: DailyStats[]): void {
-  const today = new Date().toISOString().split('T')[0];
-  const todayStats = stats.find(s => s.date === today);
+  const today = new Date();
+  const todayStats = tracker.getDailyStats(today);
   if (todayStats) {
     statsDisplay.textContent = `Today: ${todayStats.pomodorosCompleted} Pomodoros, ${todayStats.focusTimeMinutes} min focus`;
   } else {
@@ -82,21 +82,52 @@ function initializeApp(): void {
       console.error('Initialization Error:', error.message);
       alert(`Error initializing app: ${error.message}`);
     } else {
-      console.error('An unexpected error occurred:', error);
+      console.error('An unexpected error occurred during initialization:', error);
       alert('An unexpected error occurred during initialization.');
     }
   }
 }
 
 startButton.addEventListener('click', () => {
-  tracker.start(updateTimerDisplay, () => {
-    alert(`${tracker.mode === 'pomodoro' ? 'Pomodoro' : 'Break'} finished!`);
-    tracker.setMode(tracker.mode === 'pomodoro' ? 'shortBreak' : 'pomodoro'); // Simple cycle
-    updateTimerDisplay(tracker.timeLeft);
-    updateControls(tracker.state);
-    renderStats(tracker.dailyStats);
-    setModeButtonActive(tracker.mode);
-  });
+  if (tracker.state === 'paused') {
+    tracker.resume(updateTimerDisplay, () => {
+      alert(`${tracker.mode === 'pomodoro' ? 'Pomodoro' : 'Break'} finished!`);
+      // Simple cycle: Pomodoro -> Short Break -> Pomodoro, Long Break after 4 pomodoros
+      if (tracker.mode === 'pomodoro') {
+        const todayStats = tracker.getDailyStats(new Date());
+        if (todayStats && todayStats.pomodorosCompleted % 4 === 0) {
+          tracker.setMode('longBreak');
+        } else {
+          tracker.setMode('shortBreak');
+        }
+      } else {
+        tracker.setMode('pomodoro');
+      }
+      updateTimerDisplay(tracker.timeLeft);
+      updateControls(tracker.state);
+      renderStats(tracker.dailyStats);
+      setModeButtonActive(tracker.mode);
+    });
+  } else {
+    tracker.start(updateTimerDisplay, () => {
+      alert(`${tracker.mode === 'pomodoro' ? 'Pomodoro' : 'Break'} finished!`);
+      // Simple cycle: Pomodoro -> Short Break -> Pomodoro, Long Break after 4 pomodoros
+      if (tracker.mode === 'pomodoro') {
+        const todayStats = tracker.getDailyStats(new Date());
+        if (todayStats && todayStats.pomodorosCompleted % 4 === 0) {
+          tracker.setMode('longBreak');
+        } else {
+          tracker.setMode('shortBreak');
+        }
+      } else {
+        tracker.setMode('pomodoro');
+      }
+      updateTimerDisplay(tracker.timeLeft);
+      updateControls(tracker.state);
+      renderStats(tracker.dailyStats);
+      setModeButtonActive(tracker.mode);
+    });
+  }
   updateControls(tracker.state);
 });
 
@@ -107,7 +138,6 @@ pauseButton.addEventListener('click', () => {
 
 stopButton.addEventListener('click', () => {
   tracker.stop();
-  tracker.reset();
   updateTimerDisplay(tracker.timeLeft);
   updateControls(tracker.state);
 });
@@ -153,12 +183,20 @@ taskList.addEventListener('click', (event) => {
   const taskId = target.dataset.taskId;
 
   if (taskId) {
-    if (target.matches('input[type="checkbox"]')) {
-      tracker.toggleTaskCompletion(taskId);
-      renderTasks(tracker.tasks);
-    } else if (target.matches('.delete-task')) {
-      tracker.deleteTask(taskId);
-      renderTasks(tracker.tasks);
+    try {
+      if (target.matches('input[type="checkbox"]')) {
+        tracker.toggleTaskCompletion(taskId);
+        renderTasks(tracker.tasks);
+      } else if (target.matches('.delete-task')) {
+        tracker.deleteTask(taskId);
+        renderTasks(tracker.tasks);
+      }
+    } catch (error) {
+      if (error instanceof TaskNotFoundError) {
+        alert(error.message);
+      } else {
+        console.error('Error managing task:', error);
+      }
     }
   }
 });

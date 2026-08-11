@@ -52,6 +52,7 @@ export class TaskNotFoundError extends TaskError {
 
 export class PomodoroTracker {
   private timerId: number | null = null;
+  private idCounter = 0;
   private _state: PomodoroState = 'stopped';
   private _mode: PomodoroMode = 'pomodoro';
   private _timeLeft: number;
@@ -76,6 +77,12 @@ export class PomodoroTracker {
     this._longBreakDuration = longBreakDuration;
     this._timeLeft = this._pomodoroDuration;
     this.loadState();
+  }
+
+  // Date.now() alone collides when two entities are created in the same
+  // millisecond; a per-instance counter keeps ids unique.
+  private nextId(): string {
+    return `${Date.now().toString(36)}-${(this.idCounter++).toString(36)}`;
   }
 
   get state(): PomodoroState { return this._state; }
@@ -155,7 +162,7 @@ export class PomodoroTracker {
 
     this._state = 'running';
     this._currentSession = {
-      id: Date.now().toString(),
+      id: this.nextId(),
       taskId: taskId,
       startTime: new Date(),
       endTime: null,
@@ -171,11 +178,14 @@ export class PomodoroTracker {
       onTick(this._timeLeft);
 
       if (this._timeLeft <= 0) {
+        // Capture the session before stop(), which discards _currentSession —
+        // otherwise completed sessions are never recorded.
+        const completedSession = this._currentSession;
+        this._currentSession = null;
         this.stop();
-        if (this._currentSession) {
-          this._currentSession.endTime = new Date();
-          this._sessions.push(this._currentSession);
-          this._currentSession = null;
+        if (completedSession) {
+          completedSession.endTime = new Date();
+          this._sessions.push(completedSession);
           this.updateDailyStats();
         }
         onComplete();
@@ -236,7 +246,7 @@ export class PomodoroTracker {
     if (!trimmedName) {
       throw new TaskError('Task name cannot be empty.');
     }
-    const newTask: Task = { id: Date.now().toString(), name: trimmedName, completed: false };
+    const newTask: Task = { id: this.nextId(), name: trimmedName, completed: false };
     this._tasks.push(newTask);
     this.saveState();
     return newTask;

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { PomodoroTracker, InvalidConfigError, TaskNotFoundError, TaskError } from "./app";
 
 // Mock localStorage
@@ -119,7 +119,8 @@ describe("PomodoroTracker", () => {
     tracker.start(onTick, onComplete);
     vi.advanceTimersByTime(3000);
 
-    expect(tracker.timeLeft).toBe(0);
+    // On completion the tracker stops and resets timeLeft for the next run.
+    expect(tracker.timeLeft).toBe(3);
     expect(onComplete).toHaveBeenCalledTimes(1);
     expect(tracker.state).toBe("stopped");
     expect(tracker.sessions.length).toBe(1);
